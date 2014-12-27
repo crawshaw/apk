@@ -15,13 +15,24 @@
 //	Name: lib/armeabi/libbasic.so
 //	SHA1-Digest: ntLSc1eLCS2Tq1oB4Vw6jvkranw=
 //
-// CERT.SF is a similar manifest. For each entry in the manifest it includes
-// a base64-encoded SHA1 digest RSA signed SHA1 key, for example:
+// For debugging, the equivalent SHA1-Digest can be generated with OpenSSL:
+//
+//	cat lib/armeabi/libbasic.so | openssl sha1 -binary | openssl base64
+//
+// CERT.SF is a similar manifest. It begins with a SHA1 digest of the entire
+// manifest file:
+//
+//	Signature-Version: 1.0
+//	Created-By: 1.0 (Android)
+//	SHA1-Digest-Manifest: aJw+u+10C3Enbg8XRCN6jepluYA=
+//
+// Then for each entry in the manifest it has a SHA1 digest of the manfiest's
+// hash combined with the file name:
 //
 //	Name: lib/armeabi/libbasic.so
 //	SHA1-Digest: Q7NAS6uzrJr6WjePXSGT+vvmdiw=
 //
-// For debugging, the equivalent SHA1-Digest can be generated with OpenSSL:
+// This can also be generated with openssl:
 //
 //	echo -en "Name: lib/armeabi/libbasic.so\r\nSHA1-Digest: ntLSc1eLCS2Tq1oB4Vw6jvkranw=\r\n\r\n" | openssl sha1 -binary | openssl base64
 //
@@ -54,36 +65,156 @@ package apk
 
 import (
 	"archive/zip"
+	"bytes"
 	"crypto/rsa"
+	"crypto/sha1"
+	"encoding/base64"
+	"fmt"
 	"hash"
 	"io"
 )
+
+// NewWriter returns a new Writer writing an APK file to w.
+// The APK will be signed with key.
+func NewWriter(w io.Writer, key *rsa.PrivateKey) *Writer {
+	apkw := &Writer{key: key}
+	apkw.w = zip.NewWriter(&countWriter{apkw: apkw, w: w})
+	return apkw
+}
+
+// Writer implements an APK file writer.
+type Writer struct {
+	offset   int
+	w        *zip.Writer
+	key      *rsa.PrivateKey
+	manifest []manifestEntry
+	cur      *fileWriter
+}
+
+// Create adds a file to the APK archive using the provided name.
+//
+// The name must be a relative path. The file's contents must be written to
+// the returned io.Writer before the next call to Create or Close.
+func (w *Writer) Create(name string) (io.Writer, error) {
+	w.clearCur()
+
+	// Align start of file contents by using Extra as padding.
+	if err := w.w.Flush(); err != nil { // for exact offset
+		return nil, fmt.Errorf("apk: Create(%q): %v", name, err)
+	}
+	const fileHeaderLen = 30 // + filename + extra
+	start := w.offset + fileHeaderLen + len(name)
+	extra := start % 4
+
+	zipfw, err := w.w.CreateHeader(&zip.FileHeader{
+		Name:  name,
+		Extra: make([]byte, extra),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("apk: Create: %v", err)
+	}
+	w.cur = &fileWriter{
+		name: name,
+		w:    zipfw,
+		sha1: sha1.New(),
+	}
+	return w.cur, nil
+}
+
+// Close finishes writing the APK. This includes writing the manifest and
+// signing the archive, and writing the ZIP central directory.
+//
+// It does not close the underlying writer.
+func (w *Writer) Close() error {
+	w.clearCur()
+
+	manifest := new(bytes.Buffer)
+	fmt.Fprint(manifest, manifestHeader)
+	certBody := new(bytes.Buffer)
+
+	for _, entry := range w.manifest {
+		n := entry.name
+		h := base64.StdEncoding.EncodeToString(entry.sha1.Sum(nil))
+		fmt.Fprintf(manifest, "Name: %s\nSHA1-Digest: %s\n\n", n, h)
+		cHash := sha1.New()
+		fmt.Fprintf(cHash, "Name: %s\r\nSHA1-Digest: %s\r\n\r\n", n, h)
+		ch := base64.StdEncoding.EncodeToString(cHash.Sum(nil))
+		fmt.Fprintf(certBody, "Name: %s\nSHA1-Digest: %s\n\n", n, ch)
+	}
+
+	mHash := sha1.New()
+	mHash.Write(manifest.Bytes())
+	cert := new(bytes.Buffer)
+	fmt.Fprint(cert, certHeader)
+	fmt.Fprintf(cert, "SHA1-Digest-Manifest: %s\n\n", base64.StdEncoding.EncodeToString(mHash.Sum(nil)))
+
+	mw, err := w.Create("META-INF/MANIFEST.MF")
+	if err != nil {
+		return err
+	}
+	if _, err := manifest.WriteTo(mw); err != nil {
+		return fmt.Errorf("apk: %v", err)
+	}
+
+	cw, err := w.Create("META-INF/CERT.SF")
+	if err != nil {
+		return err
+	}
+	if _, err := cert.WriteTo(cw); err != nil {
+		return fmt.Errorf("apk: %v", err)
+	}
+
+	return w.w.Close()
+}
+
+const manifestHeader = `Manifest-Version: 1.0
+Created-By: 1.0 (Go)
+
+`
+
+const certHeader = `Signature-Version: 1.0
+Created-By: 1.0 (Go)
+`
+
+func (w *Writer) clearCur() {
+	if w.cur == nil {
+		return
+	}
+	w.manifest = append(w.manifest, manifestEntry{
+		name: w.cur.name,
+		sha1: w.cur.sha1,
+	})
+	w.cur.closed = true
+	w.cur = nil
+}
 
 type manifestEntry struct {
 	name string
 	sha1 hash.Hash
 }
 
-type Writer struct {
-	w zip.Writer
+type countWriter struct {
+	apkw *Writer
+	w    io.Writer
+}
 
-	manifest []manifestEntry
+func (c *countWriter) Write(p []byte) (n int, err error) {
+	n, err = c.w.Write(p)
+	c.apkw.offset += n
+	return n, err
+}
 
-	cur struct {
-		path string
-		w    io.Writer
-		sha1 hash.Hash
+type fileWriter struct {
+	name   string
+	w      io.Writer
+	sha1   hash.Hash
+	closed bool
+}
+
+func (w *fileWriter) Write(p []byte) (n int, err error) {
+	if w.closed {
+		return 0, fmt.Errorf("apk: write to closed file %q", w.name)
 	}
-}
-
-func (w *Writer) Create(name string) (io.Writer, error) {
-	return nil, nil
-}
-
-func (w *Writer) Close() error {
-	return nil
-}
-
-func NewWriter(w io.Writer, key *rsa.PrivateKey) *Writer {
-	return nil
+	w.sha1.Write(p)
+	return w.w.Write(p)
 }
