@@ -148,6 +148,7 @@ func (w *Writer) Close() error {
 	cert := new(bytes.Buffer)
 	fmt.Fprint(cert, certHeader)
 	fmt.Fprintf(cert, "SHA1-Digest-Manifest: %s\n\n", base64.StdEncoding.EncodeToString(mHash.Sum(nil)))
+	cert.Write(certBody.Bytes())
 
 	mw, err := w.Create("META-INF/MANIFEST.MF")
 	if err != nil {
