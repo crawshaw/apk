@@ -1,6 +1,6 @@
 // Package apk provides support for writing APK archives.
 //
-// TODO(crawshaw): implement
+// TODO(crawshaw): test
 //
 // APK is the archival format used for Android apps. It is a ZIP archive with
 // three extra files:
@@ -66,6 +66,7 @@ package apk
 import (
 	"archive/zip"
 	"bytes"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/sha1"
 	"encoding/base64"
@@ -76,8 +77,8 @@ import (
 
 // NewWriter returns a new Writer writing an APK file to w.
 // The APK will be signed with key.
-func NewWriter(w io.Writer, key *rsa.PrivateKey) *Writer {
-	apkw := &Writer{key: key}
+func NewWriter(w io.Writer, priv *rsa.PrivateKey) *Writer {
+	apkw := &Writer{priv: priv}
 	apkw.w = zip.NewWriter(&countWriter{apkw: apkw, w: w})
 	return apkw
 }
@@ -86,7 +87,7 @@ func NewWriter(w io.Writer, key *rsa.PrivateKey) *Writer {
 type Writer struct {
 	offset   int
 	w        *zip.Writer
-	key      *rsa.PrivateKey
+	priv     *rsa.PrivateKey
 	manifest []manifestEntry
 	cur      *fileWriter
 }
@@ -152,7 +153,7 @@ func (w *Writer) Close() error {
 	if err != nil {
 		return err
 	}
-	if _, err := manifest.WriteTo(mw); err != nil {
+	if _, err := mw.Write(manifest.Bytes()); err != nil {
 		return fmt.Errorf("apk: %v", err)
 	}
 
@@ -160,7 +161,19 @@ func (w *Writer) Close() error {
 	if err != nil {
 		return err
 	}
-	if _, err := cert.WriteTo(cw); err != nil {
+	if _, err := cw.Write(cert.Bytes()); err != nil {
+		return fmt.Errorf("apk: %v", err)
+	}
+
+	rsa, err := signPKCS7(rand.Reader, w.priv, cert.Bytes())
+	if err != nil {
+		return fmt.Errorf("apk: %v", err)
+	}
+	rw, err := w.Create("META-INF/CERT.RSA")
+	if err != nil {
+		return err
+	}
+	if _, err := rw.Write(rsa); err != nil {
 		return fmt.Errorf("apk: %v", err)
 	}
 
