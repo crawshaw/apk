@@ -17,7 +17,6 @@ import (
 //	ResChunk_header
 //	ResStringPool_header
 //	ResXMLTree_node
-//	ResXMLTree_attribute TODO(crawshaw): really?
 //
 // These are defined in:
 //
@@ -26,8 +25,8 @@ import (
 // The rough format of the file is a resource chunk containing a sequence of
 // chunks:
 //
-//	ResChunk_header (type XML)
-//	ResStringPool_header
+//	File Chunk Header (ResChunk_header, type XML)
+//	String Pool Header (ResStringPool_header, type STRING_POOL)
 //	Sequence of strings, each with the format:
 //		uint16 length
 //		uint16 extended_length -- only if top bit set on length
@@ -39,9 +38,13 @@ import (
 //		Resource ID constant defined:
 //			http://developer.android.com/reference/android/R.attr.html
 //		This appears to be a way to map strings onto enum values.
-//	Chunk: Namespace Start
+//	Chunk: Namespace Start (ResXMLTree_node; ResXMLTree_namespaceExt)
 //	Chunk: Element Start
+//		ResXMLTree_node
+//		ResXMLTree_attrExt
+//		ResXMLTree_attribute (repeated attributeCount times)
 //	Chunk: Element End
+//		(ResXMLTree_node; ResXMLTree_endElementExt)
 //	...
 //	Chunk: Namespace End
 //
