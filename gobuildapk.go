@@ -37,7 +37,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println(pkg)
 
 	manifestPath := filepath.Join(pkg.Dir, "AndroidManifest.xml")
 	if _, err := os.Stat(manifestPath); err != nil {
@@ -71,6 +70,7 @@ func main() {
 		"GOOS=android",
 		"GOARCH=arm",
 		"GOARM=7",
+		"GOROOT=" + os.Getenv("GOROOT"),
 		"GOPATH=" + os.Getenv("GOPATH"),
 	}
 	if err := cmd.Run(); err != nil {
@@ -85,7 +85,6 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	fmt.Println(privKey)
 
 	out, err := os.Create(filepath.Base(pkg.Dir) + ".apk")
 	if err != nil {
