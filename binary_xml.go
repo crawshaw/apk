@@ -105,7 +105,7 @@ func binaryXML(r io.Reader) ([]byte, error) {
 			})
 		case xml.EndElement:
 			elements = append(elements, &binEndElement{
-				line: line,
+				line: line - 1, // TODO not right, not wrong </>.
 				ns:   pool.getNS(tok.Name.Space),
 				name: pool.get(tok.Name.Local),
 			})
@@ -120,7 +120,10 @@ func binaryXML(r io.Reader) ([]byte, error) {
 				continue
 			}
 			s = "\t" + s + "\n" // TODO just for test case
-			pool.get(s)
+			elements = append(elements, &binCharData{
+				line: line - 1,
+				data: pool.get(s),
+			})
 		case xml.Comment:
 			// Ignored by Anroid Binary XML format.
 		case xml.ProcInst:
@@ -167,6 +170,7 @@ const (
 	headerEndNamespace              = 0x0101
 	headerStartElement              = 0x0102
 	headerEndElement                = 0x0103
+	headerCharData                  = 0x0104
 )
 
 func appendU16(b []byte, v uint16) []byte {
@@ -303,8 +307,9 @@ func (p *binStringPool) get(str string) *bstring {
 	if len(str)>>16 > 0 {
 		panic(fmt.Sprintf("string lengths over 1<<15 not yet supported, got len %d for string that starts %q", len(str), str[:100]))
 	}
-	res.enc = appendU16(nil, uint16(len(str)))
-	for _, w := range utf16.Encode([]rune(str)) {
+	strUTF16 := utf16.Encode([]rune(str))
+	res.enc = appendU16(nil, uint16(len(strUTF16)))
+	for _, w := range strUTF16 {
 		res.enc = appendU16(res.enc, w)
 	}
 	res.enc = appendU16(res.enc, 0)
@@ -491,7 +496,7 @@ func (a *binAttr) append(b []byte) []byte {
 		b = append(b, 0)             // unused padding
 		b = append(b, 0x12)          // INT_BOOLEAN
 		if v {
-			b = appendU32(b, 1)
+			b = appendU32(b, 0xffffffff)
 		} else {
 			b = appendU32(b, 0)
 		}
@@ -499,7 +504,7 @@ func (a *binAttr) append(b []byte) []byte {
 		b = appendU32(b, 0xffffffff) // raw value
 		b = appendU16(b, 8)          // size
 		b = append(b, 0)             // unused padding
-		b = append(b, 0x10)          // TODO double check configChanges
+		b = append(b, 0x11)          // INT_HEX
 		b = appendU32(b, uint32(v))
 	case *bstring:
 		b = appendU32(b, v.ind) // raw value
@@ -593,5 +598,33 @@ func (e binEndNamspace) append(b []byte) []byte {
 	b = appendU32(b, 0xffffffff) // comment
 	b = appendU32(b, e.prefix.ind)
 	b = appendU32(b, e.url.ind)
+	return b
+}
+
+type binCharData struct {
+	line int
+	data *bstring
+}
+
+func (*binCharData) size() int {
+	return 8 + // chunk header
+		4 + // line number
+		4 + // comment
+		4 + // data
+		8 // junk
+}
+
+func (e *binCharData) append(b []byte) []byte {
+	b = appendU16(b, uint16(headerCharData))
+	b = appendU16(b, 0x10) // chunk header size
+	b = appendU16(b, 0x1c) // size
+	b = appendU16(b, 0)
+	b = appendU32(b, uint32(e.line))
+	b = appendU32(b, 0xffffffff) // comment
+	b = appendU32(b, e.data.ind)
+	b = appendU16(b, 0x08)
+	b = appendU16(b, 0)
+	b = appendU16(b, 0)
+	b = appendU16(b, 0)
 	return b
 }
