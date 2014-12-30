@@ -4,6 +4,7 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
+	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -58,7 +59,7 @@ func binaryXML(r io.Reader) ([]byte, error) {
 
 	pool := new(binStringPool)
 	depth := 0
-	elements := []interface{}{}
+	elements := []chunk{}
 	namespaceEnds := make(map[int]binEndNamspace)
 
 	for {
@@ -73,7 +74,7 @@ func binaryXML(r io.Reader) ([]byte, error) {
 		switch tok := tok.(type) {
 		case xml.StartElement:
 			// Intercept namespace definitions.
-			var attr []binAttr
+			var attr []*binAttr
 			for _, a := range tok.Attr {
 				if a.Name.Space == "xmlns" {
 					elements = append(elements, binStartNamspace{
@@ -96,16 +97,16 @@ func binaryXML(r io.Reader) ([]byte, error) {
 			}
 
 			depth++
-			elements = append(elements, binStartElement{
+			elements = append(elements, &binStartElement{
 				line: line,
-				ns:   pool.get(tok.Name.Space),
+				ns:   pool.getNS(tok.Name.Space),
 				name: pool.get(tok.Name.Local),
 				attr: attr,
 			})
 		case xml.EndElement:
-			elements = append(elements, binEndElement{
+			elements = append(elements, &binEndElement{
 				line: line,
-				ns:   pool.get(tok.Name.Space),
+				ns:   pool.getNS(tok.Name.Space),
 				name: pool.get(tok.Name.Local),
 			})
 			depth--
@@ -132,15 +133,26 @@ func binaryXML(r io.Reader) ([]byte, error) {
 	}
 
 	sortPool(pool)
+	for _, e := range elements {
+		if e, ok := e.(*binStartElement); ok {
+			sortAttr(e, pool)
+		}
+	}
 
 	resMap := &binResMap{pool}
 
 	size := 8 + pool.size() + resMap.size()
+	for _, e := range elements {
+		size += e.size()
+	}
 
 	b := make([]byte, 0, size)
 	b = appendHeader(b, headerXML, size)
 	b = pool.append(b)
 	b = resMap.append(b)
+	for _, e := range elements {
+		b = e.append(b)
+	}
 
 	return b, nil
 }
@@ -236,6 +248,11 @@ type bstring struct {
 	enc []byte // 2-byte length, utf16le, 2-byte zero
 }
 
+type chunk interface {
+	size() int
+	append([]byte) []byte
+}
+
 type binResMap struct {
 	pool *binStringPool
 }
@@ -294,9 +311,16 @@ func (p *binStringPool) get(str string) *bstring {
 	return res
 }
 
-func (p *binStringPool) getAttr(attr xml.Attr) (binAttr, error) {
-	a := binAttr{
-		ns:   p.get(attr.Name.Space),
+func (p *binStringPool) getNS(ns string) *bstring {
+	if ns == "" {
+		return nil
+	}
+	return p.get(ns)
+}
+
+func (p *binStringPool) getAttr(attr xml.Attr) (*binAttr, error) {
+	a := &binAttr{
+		ns:   p.getNS(attr.Name.Space),
 		name: p.get(attr.Name.Local),
 	}
 	if attr.Name.Space != "http://schemas.android.com/apk/res/android" {
@@ -309,13 +333,13 @@ func (p *binStringPool) getAttr(attr xml.Attr) (binAttr, error) {
 	case "versionCode", "minSdkVersion":
 		v, err := strconv.Atoi(attr.Value)
 		if err != nil {
-			return binAttr{}, err
+			return nil, err
 		}
 		a.data = int(v)
 	case "hasCode", "debuggable":
 		v, err := strconv.ParseBool(attr.Value)
 		if err != nil {
-			return binAttr{}, err
+			return nil, err
 		}
 		a.data = v
 	case "configChanges":
@@ -348,7 +372,11 @@ func (p *binStringPool) size() int {
 	return stringPoolPreamble + 4*len(p.s) + strLens + 2
 }
 
-var sortPool = func(p *binStringPool) { sort.Sort(p) }
+// overloaded for testing.
+var (
+	sortPool = func(p *binStringPool) { sort.Sort(p) }
+	sortAttr = func(e *binStartElement, p *binStringPool) {}
+)
 
 func (b *binStringPool) Len() int           { return len(b.s) }
 func (b *binStringPool) Less(i, j int) bool { return b.s[i].str < b.s[j].str }
@@ -385,16 +413,44 @@ type binStartElement struct {
 	line int
 	ns   *bstring
 	name *bstring
-	attr []binAttr
+	attr []*binAttr
 }
 
-func (b *binStartElement) size() int {
+func (e *binStartElement) size() int {
 	return 8 + // chunk header
 		4 + // line number
 		4 + // comment
 		4 + // ns
 		4 + // name
-		len(b.attr)*(4+4+4+4+4)
+		2 + 2 + 2 + // attribute start, size, count
+		2 + 2 + 2 + // id/class/style index
+		len(e.attr)*(4+4+4+4+4)
+}
+
+func (e *binStartElement) append(b []byte) []byte {
+	b = appendU16(b, uint16(headerStartElement))
+	b = appendU16(b, 0x10) // chunk header size
+	b = appendU16(b, uint16(e.size()))
+	b = appendU16(b, 0)
+	b = appendU32(b, uint32(e.line))
+	b = appendU32(b, 0xffffffff) // comment
+	if e.ns == nil {
+		b = appendU32(b, 0xffffffff)
+	} else {
+		b = appendU32(b, e.ns.ind)
+	}
+	b = appendU32(b, e.name.ind)
+	b = appendU16(b, 0x14) // attribute start
+	b = appendU16(b, 0x14) // attribute size
+	b = appendU16(b, uint16(len(e.attr)))
+	b = appendU16(b, 0) // ID index (none)
+	b = appendU16(b, 0) // class index (none)
+	b = appendU16(b, 0) // style index (none)
+	log.Printf("%v", e.attr)
+	for _, a := range e.attr {
+		b = a.append(b)
+	}
+	return b
 }
 
 type binAttr struct {
@@ -403,26 +459,54 @@ type binAttr struct {
 	data interface{} // either int (INT_DEC) or *bstring (STRING)
 }
 
+/*
+func (*binAttr) size() int {
+	return 4 + // ns
+		4 + // name
+		4 + // raw value
+		2 + // size
+		1 + // padding
+		1 + // type
+		4 // value
+}
+*/
+
 func (a *binAttr) append(b []byte) []byte {
-	b = appendU32(b, a.ns.ind)
+	if a.ns != nil {
+		b = appendU32(b, a.ns.ind)
+	} else {
+		b = appendU32(b, 0xffffffff)
+	}
 	b = appendU32(b, a.name.ind)
-	b = appendU32(b, 0xffffffff) // raw value
-	b = appendU16(b, 8)          // size
-	b = appendU16(b, 0)          // unused padding
 	switch v := a.data.(type) {
 	case int:
-		b = append(b, 0x10) // INT_DEC
+		b = appendU32(b, 0xffffffff) // raw value
+		b = appendU16(b, 8)          // size
+		b = append(b, 0)             // unused padding
+		b = append(b, 0x10)          // INT_DEC
 		b = appendU32(b, uint32(v))
 	case bool:
-		b = append(b, 0x12) // INT_BOOLEAN
+		b = appendU32(b, 0xffffffff) // raw value
+		b = appendU16(b, 8)          // size
+		b = append(b, 0)             // unused padding
+		b = append(b, 0x12)          // INT_BOOLEAN
 		if v {
 			b = appendU32(b, 1)
 		} else {
 			b = appendU32(b, 0)
 		}
 	case uint32:
-		b = append(b, 0x10) // TODO double check configChanges
+		b = appendU32(b, 0xffffffff) // raw value
+		b = appendU16(b, 8)          // size
+		b = append(b, 0)             // unused padding
+		b = append(b, 0x10)          // TODO double check configChanges
 		b = appendU32(b, uint32(v))
+	case *bstring:
+		b = appendU32(b, v.ind) // raw value
+		b = appendU16(b, 8)     // size
+		b = append(b, 0)        // unused padding
+		b = append(b, 0x03)     // STRING
+		b = appendU32(b, v.ind)
 	default:
 		panic(fmt.Sprintf("unexpected attr type: %T (%v)", v, v))
 	}
@@ -433,7 +517,7 @@ type binEndElement struct {
 	line int
 	ns   *bstring
 	name *bstring
-	attr []binAttr
+	attr []*binAttr
 }
 
 func (*binEndElement) size() int {
@@ -444,14 +528,70 @@ func (*binEndElement) size() int {
 		4 // name
 }
 
+func (e *binEndElement) append(b []byte) []byte {
+	b = appendU16(b, uint16(headerEndElement))
+	b = appendU16(b, 0x10) // chunk header size
+	b = appendU16(b, uint16(e.size()))
+	b = appendU16(b, 0)
+	b = appendU32(b, uint32(e.line))
+	b = appendU32(b, 0xffffffff) // comment
+	if e.ns == nil {
+		b = appendU32(b, 0xffffffff)
+	} else {
+		b = appendU32(b, e.ns.ind)
+	}
+	b = appendU32(b, e.name.ind)
+	return b
+}
+
 type binStartNamspace struct {
 	line   int
 	prefix *bstring
 	url    *bstring
 }
 
+func (binStartNamspace) size() int {
+	return 8 + // chunk header
+		4 + // line number
+		4 + // comment
+		4 + // prefix
+		4 // url
+}
+
+func (e binStartNamspace) append(b []byte) []byte {
+	b = appendU16(b, uint16(headerStartNamespace))
+	b = appendU16(b, 0x10) // chunk header size
+	b = appendU16(b, uint16(e.size()))
+	b = appendU16(b, 0)
+	b = appendU32(b, uint32(e.line))
+	b = appendU32(b, 0xffffffff) // comment
+	b = appendU32(b, e.prefix.ind)
+	b = appendU32(b, e.url.ind)
+	return b
+}
+
 type binEndNamspace struct {
 	line   int
 	prefix *bstring
 	url    *bstring
+}
+
+func (binEndNamspace) size() int {
+	return 8 + // chunk header
+		4 + // line number
+		4 + // comment
+		4 + // prefix
+		4 // url
+}
+
+func (e binEndNamspace) append(b []byte) []byte {
+	b = appendU16(b, uint16(headerEndNamespace))
+	b = appendU16(b, 0x10) // chunk header size
+	b = appendU16(b, uint16(e.size()))
+	b = appendU16(b, 0)
+	b = appendU32(b, uint32(e.line))
+	b = appendU32(b, 0xffffffff) // comment
+	b = appendU32(b, e.prefix.ind)
+	b = appendU32(b, e.url.ind)
+	return b
 }
