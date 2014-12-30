@@ -379,7 +379,7 @@ func (p *binStringPool) unpaddedSize() int {
 
 func (p *binStringPool) size() int {
 	size := p.unpaddedSize()
-	size += size % 0x03
+	size += size % 0x04
 	return size
 }
 
@@ -439,7 +439,7 @@ func (p *binStringPool) append(b []byte) []byte {
 		b = append(b, bstr.enc...)
 	}
 
-	for i := p.unpaddedSize() % 0x03; i > 0; i-- {
+	for i := p.unpaddedSize() % 0x04; i > 0; i-- {
 		b = append(b, 0)
 	}
 	return b
