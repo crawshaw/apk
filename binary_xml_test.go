@@ -10,8 +10,12 @@ import (
 
 var dump = flag.Bool("dump", false, "dump junk.bin binary output")
 
+var (
+	origSortPool = sortPool
+	origSortAttr = sortAttr
+)
+
 func TestBinaryXML(t *testing.T) {
-	origSortPool, origSortAttr := sortPool, sortAttr
 	sortPool, sortAttr = sortToMatchTest, sortAttrToMatchTest
 	defer func() { sortPool, sortAttr = origSortPool, origSortAttr }()
 
@@ -35,9 +39,6 @@ func TestBinaryXML(t *testing.T) {
 	}
 
 	for i, o := range output {
-		if i < 8 {
-			continue
-		}
 		if skipByte[i] {
 			continue
 		}
@@ -51,8 +52,6 @@ func TestBinaryXML(t *testing.T) {
 // The output of the Android encoder seems to be arbitrary. So for testing,
 // we sort the string pool order to match the output we have seen.
 func sortToMatchTest(p *binStringPool) {
-	p.get("") // match a meaningless bug
-
 	var names = []string{
 		"versionCode",
 		"versionName",
@@ -222,7 +221,7 @@ var output = []byte{
 	/* 0108 */ 0x43, 0x00, 0x6f, 0x00,
 	/* 010c */ 0x64, 0x00, 0x65, 0x00,
 	/* 0110 */ 0x00, 0x00,
-	/* 0112 */ 0x0a, 0x00, //  [0x05] len=10 value="debuggable" (NOT IN ORIGINAL)
+	/* 0112 */ 0x0a, 0x00, //  [0x05] len=10 value="debuggable"
 	/* 0114 */ 0x64, 0x00, 0x65, 0x00,
 	/* 0118 */ 0x62, 0x00, 0x75, 0x00,
 	/* 011c */ 0x67, 0x00, 0x67, 0x00,

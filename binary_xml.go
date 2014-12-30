@@ -103,6 +103,7 @@ func binaryXML(r io.Reader) ([]byte, error) {
 				attr: attr,
 			})
 		case xml.EndElement:
+			// TODO: ns, name := pool.getName(tok.Name)
 			elements = append(elements, &binEndElement{
 				line: line,
 				ns:   pool.getNS(tok.Name.Space),
@@ -317,6 +318,7 @@ func (p *binStringPool) get(str string) *bstring {
 
 func (p *binStringPool) getNS(ns string) *bstring {
 	if ns == "" {
+		p.get("")
 		return nil
 	}
 	return p.get(ns)
@@ -367,17 +369,45 @@ const stringPoolPreamble = 0 +
 	4 + // styles start
 	0
 
-func (p *binStringPool) size() int {
+func (p *binStringPool) unpaddedSize() int {
 	strLens := 0
 	for _, s := range p.s {
 		strLens += len(s.enc)
 	}
-	return stringPoolPreamble + 4*len(p.s) + strLens + 2
+	return stringPoolPreamble + 4*len(p.s) + strLens
+}
+
+func (p *binStringPool) size() int {
+	size := p.unpaddedSize()
+	size += size % 0x03
+	return size
 }
 
 // overloaded for testing.
 var (
-	sortPool = func(p *binStringPool) { sort.Sort(p) }
+	sortPool = func(p *binStringPool) {
+		sort.Sort(p)
+
+		// Move resourceCodes to the front.
+		s := make([]*bstring, 0)
+		m := make(map[string]*bstring)
+		for str := range resourceCodes {
+			bstr := p.m[str]
+			if bstr == nil {
+				continue
+			}
+			bstr.ind = uint32(len(s))
+			s = append(s, bstr)
+			m[str] = bstr
+			delete(p.m, str)
+		}
+		for _, bstr := range p.m {
+			bstr.ind = uint32(len(s))
+			s = append(s, bstr)
+		}
+		p.s = s
+		p.m = m
+	}
 	sortAttr = func(e *binStartElement, p *binStringPool) {}
 )
 
@@ -408,7 +438,10 @@ func (p *binStringPool) append(b []byte) []byte {
 	for _, bstr := range p.s {
 		b = append(b, bstr.enc...)
 	}
-	b = appendU16(b, 0)
+
+	for i := p.unpaddedSize() % 0x03; i > 0; i-- {
+		b = append(b, 0)
+	}
 	return b
 }
 
