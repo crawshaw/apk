@@ -132,13 +132,15 @@ func binaryXML(r io.Reader) ([]byte, error) {
 	}
 
 	sortPool(pool)
-	size := 8 + pool.size()
-	//for _, e := range elements {
-	//}
 
-	b := []byte{}
+	resMap := &binResMap{pool}
+
+	size := 8 + pool.size() + resMap.size()
+
+	b := make([]byte, 0, size)
 	b = appendHeader(b, headerXML, size)
 	b = pool.append(b)
+	b = resMap.append(b)
 
 	return b, nil
 }
@@ -232,6 +234,33 @@ type bstring struct {
 	ind uint32
 	str string
 	enc []byte // 2-byte length, utf16le, 2-byte zero
+}
+
+type binResMap struct {
+	pool *binStringPool
+}
+
+func (p *binResMap) append(b []byte) []byte {
+	b = appendHeader(b, headerResourceMap, p.size())
+	for _, bstr := range p.pool.s {
+		c, ok := resourceCodes[bstr.str]
+		if !ok {
+			break
+		}
+		b = appendU32(b, c)
+	}
+	return b
+}
+
+func (p *binResMap) size() int {
+	count := 0
+	for _, bstr := range p.pool.s {
+		if _, ok := resourceCodes[bstr.str]; !ok {
+			break
+		}
+		count++
+	}
+	return 8 + 4*count
 }
 
 type binStringPool struct {
