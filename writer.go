@@ -97,8 +97,21 @@ type Writer struct {
 // The name must be a relative path. The file's contents must be written to
 // the returned io.Writer before the next call to Create or Close.
 func (w *Writer) Create(name string) (io.Writer, error) {
-	w.clearCur()
+	if err := w.clearCur(); err != nil {
+		return nil, fmt.Errorf("apk: %v", err)
+	}
+	if name == "AndroidManifest.xml" {
+		w.cur = &fileWriter{
+			name: name,
+			w:    new(bytes.Buffer),
+			sha1: sha1.New(),
+		}
+		return w.cur, nil
+	}
+	return w.create(name)
+}
 
+func (w *Writer) create(name string) (io.Writer, error) {
 	// Align start of file contents by using Extra as padding.
 	if err := w.w.Flush(); err != nil { // for exact offset
 		return nil, fmt.Errorf("apk: Create(%q): %v", name, err)
@@ -127,7 +140,9 @@ func (w *Writer) Create(name string) (io.Writer, error) {
 //
 // It does not close the underlying writer.
 func (w *Writer) Close() error {
-	w.clearCur()
+	if err := w.clearCur(); err != nil {
+		return fmt.Errorf("apk: %v", err)
+	}
 
 	manifest := new(bytes.Buffer)
 	fmt.Fprint(manifest, manifestHeader)
@@ -190,9 +205,23 @@ const certHeader = `Signature-Version: 1.0
 Created-By: 1.0 (Go)
 `
 
-func (w *Writer) clearCur() {
+func (w *Writer) clearCur() error {
 	if w.cur == nil {
-		return
+		return nil
+	}
+	if w.cur.name == "AndroidManifest.xml" {
+		buf := w.cur.w.(*bytes.Buffer)
+		b, err := binaryXML(buf)
+		if err != nil {
+			return fmt.Errorf("apk: %v", err)
+		}
+		f, err := w.create("AndroidManifest.xml")
+		if err != nil {
+			return err
+		}
+		if _, err := f.Write(b); err != nil {
+			return fmt.Errorf("apk: %v", err)
+		}
 	}
 	w.manifest = append(w.manifest, manifestEntry{
 		name: w.cur.name,
@@ -200,6 +229,7 @@ func (w *Writer) clearCur() {
 	})
 	w.cur.closed = true
 	w.cur = nil
+	return nil
 }
 
 type manifestEntry struct {
