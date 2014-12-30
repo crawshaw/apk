@@ -11,6 +11,8 @@ package main
 import (
 	"crypto/x509"
 	"encoding/pem"
+	"encoding/xml"
+	"errors"
 	"flag"
 	"fmt"
 	"go/build"
@@ -58,6 +60,7 @@ func main() {
 		fmt.Fprintf(os.Stderr, "%s: %v\n", os.Args[0], err)
 		os.Exit(2)
 	}
+	defer os.RemoveAll(workPath)
 	libPath := filepath.Join(workPath, "lib"+pkg.Name+".so")
 
 	cmd := exec.Command(`go`, `build`, `-ldflags="-shared"`, `-o`, libPath)
@@ -91,23 +94,27 @@ func main() {
 
 	apkw := apk.NewWriter(out, privKey)
 
+	manifestData, err := ioutil.ReadFile(manifestPath)
+	if err != nil {
+		log.Fatal(err)
+	}
+	libName, err := manifestLibName(manifestData)
+	if err != nil {
+		log.Fatal(err)
+	}
+	w, err := apkw.Create("AndroidManifest.xml")
+	if err != nil {
+		log.Fatal(err)
+	}
+	if _, err := w.Write(manifestData); err != nil {
+		log.Fatal(err)
+	}
+
 	r, err := os.Open(libPath)
 	if err != nil {
 		log.Fatal(err)
 	}
-	w, err := apkw.Create("lib/armeabi/lib" + pkg.Name + ".so")
-	if err != nil {
-		log.Fatal(err)
-	}
-	if _, err := io.Copy(w, r); err != nil {
-		log.Fatal(err)
-	}
-
-	r, err = os.Open(manifestPath)
-	if err != nil {
-		log.Fatal(err)
-	}
-	w, err = apkw.Create("AndroidManifest.xml")
+	w, err = apkw.Create("lib/armeabi/lib" + libName + ".so")
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -120,6 +127,43 @@ func main() {
 	if err := apkw.Close(); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// manifestLibName parses the AndroidManifest.xml and finds the library
+// name of the NativeActivity.
+func manifestLibName(data []byte) (string, error) {
+	manifest := new(manifestXML)
+	if err := xml.Unmarshal(data, manifest); err != nil {
+		return "", err
+	}
+	if manifest.Activity.Name != "android.app.NativeActivity" {
+		return "", fmt.Errorf("can only build an .apk for NativeActivity, not %q", manifest.Activity.Name)
+	}
+	libName := ""
+	for _, md := range manifest.Activity.MetaData {
+		if md.Name == "android.app.lib_name" {
+			libName = md.Value
+			break
+		}
+	}
+	if libName == "" {
+		return "", errors.New("AndroidManifest.xml missing meta-data android.app.lib_name")
+	}
+	return libName, nil
+}
+
+type manifestXML struct {
+	Activity activityXML `xml:"application>activity"`
+}
+
+type activityXML struct {
+	Name     string        `xml:"name,attr"`
+	MetaData []metaDataXML `xml:"meta-data"`
+}
+
+type metaDataXML struct {
+	Name  string `xml:"name,attr"`
+	Value string `xml:"value,attr"`
 }
 
 var ctx = build.Default
