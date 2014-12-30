@@ -4,7 +4,6 @@ import (
 	"encoding/xml"
 	"fmt"
 	"io"
-	"log"
 	"sort"
 	"strconv"
 	"strings"
@@ -105,7 +104,7 @@ func binaryXML(r io.Reader) ([]byte, error) {
 			})
 		case xml.EndElement:
 			elements = append(elements, &binEndElement{
-				line: line - 1, // TODO not right, not wrong </>.
+				line: line,
 				ns:   pool.getNS(tok.Name.Space),
 				name: pool.get(tok.Name.Local),
 			})
@@ -121,7 +120,7 @@ func binaryXML(r io.Reader) ([]byte, error) {
 			}
 			s = "\t" + s + "\n" // TODO just for test case
 			elements = append(elements, &binCharData{
-				line: line - 1,
+				line: line,
 				data: pool.get(s),
 			})
 		case xml.Comment:
@@ -371,7 +370,6 @@ const stringPoolPreamble = 0 +
 func (p *binStringPool) size() int {
 	strLens := 0
 	for _, s := range p.s {
-		//log.Printf("len=%02d, enc=%02d value=%q", len(s.str), len(s.enc), s.str)
 		strLens += len(s.enc)
 	}
 	return stringPoolPreamble + 4*len(p.s) + strLens + 2
@@ -451,7 +449,6 @@ func (e *binStartElement) append(b []byte) []byte {
 	b = appendU16(b, 0) // ID index (none)
 	b = appendU16(b, 0) // class index (none)
 	b = appendU16(b, 0) // style index (none)
-	log.Printf("%v", e.attr)
 	for _, a := range e.attr {
 		b = a.append(b)
 	}
