@@ -25,17 +25,29 @@ import (
 //	https://android.googlesource.com/platform/frameworks/base/+/master/include/androidfw/ResourceTypes.h
 //
 // The rough format of the file is a resource chunk containing a sequence of
-// chunks:
+// chunks. Each chunk is made up of a header and a body. The header begins with
+// the contents of the ResChunk_header struct, which includes the size of both
+// the header and the body.
 //
-//	File Chunk Header (ResChunk_header, type XML)
-//	String Pool Header (ResStringPool_header, type STRING_POOL)
+// Both the header and body are 4-byte aligned.
+//
+// Values are encoded as little-endian.
+//
+// The android source code for encoding is done in the aapt tool. Its source
+// code lives in AOSP:
+//
+//	https://android.googlesource.com/platform/frameworks/base.git/+/master/tools/aapt
+//
+// A sample layout:
+//
+//	File Header (ResChunk_header, type XML)
+//	Chunk: String Pool (type STRING_POOL)
 //	Sequence of strings, each with the format:
 //		uint16 length
 //		uint16 extended_length -- only if top bit set on length
 //		UTF-16LE string
 //		two zero bytes
 //	Resource Map
-//		TODO: maybe optional? try not generating it and see what happens.
 //		The [i]th 4-byte entry in the resource map corresponds with
 //		the [i]th string from the string pool. The 4-bytes are a
 //		Resource ID constant defined:
@@ -50,8 +62,6 @@ import (
 //		(ResXMLTree_node; ResXMLTree_endElementExt)
 //	...
 //	Chunk: Namespace End
-//
-// Values are encoded as little-endian.
 func binaryXML(r io.Reader) ([]byte, error) {
 	lr := &lineReader{r: r}
 	d := xml.NewDecoder(lr)
@@ -103,7 +113,6 @@ func binaryXML(r io.Reader) ([]byte, error) {
 				attr: attr,
 			})
 		case xml.EndElement:
-			// TODO: ns, name := pool.getName(tok.Name)
 			elements = append(elements, &binEndElement{
 				line: line,
 				ns:   pool.getNS(tok.Name.Space),
@@ -115,14 +124,34 @@ func binaryXML(r io.Reader) ([]byte, error) {
 				elements = append(elements, nsEnd)
 			}
 		case xml.CharData:
-			s := strings.TrimSpace(string(tok))
-			if s == "" {
+			// The aapt tool appears to "compact" leading and
+			// trailing whitepsace. See XMLNode::removeWhitespace in
+			// https://android.googlesource.com/platform/frameworks/base.git/+/master/tools/aapt/XMLNode.cpp
+			if len(tok) == 0 {
 				continue
 			}
-			s = "\t" + s + "\n" // TODO just for test case
+			start, end := 0, len(tok)
+			for start < len(tok) && isSpace(tok[start]) {
+				start++
+			}
+			for end > start && isSpace(tok[end-1]) {
+				end--
+			}
+			if start == end {
+				continue // all whitespace, skip it
+			}
+
+			// Preserve one character of whitespace.
+			if start > 0 {
+				start--
+			}
+			if end < len(tok) {
+				end++
+			}
+
 			elements = append(elements, &binCharData{
 				line: line,
-				data: pool.get(s),
+				data: pool.get(string(tok[start:end])),
 			})
 		case xml.Comment:
 			// Ignored by Anroid Binary XML format.
@@ -160,6 +189,14 @@ func binaryXML(r io.Reader) ([]byte, error) {
 	return b, nil
 }
 
+func isSpace(b byte) bool {
+	switch b {
+	case '\t', '\n', '\v', '\f', '\r', ' ', 0x85, 0xA0:
+		return true
+	}
+	return false
+}
+
 type headerType uint16
 
 const (
@@ -194,15 +231,16 @@ func appendHeader(b []byte, typ headerType, size int) []byte {
 //
 // http://developer.android.com/reference/android/R.attr.html
 var resourceCodes = map[string]uint32{
-	"versionCode":   0x0101021b,
-	"versionName":   0x0101021c,
-	"minSdkVersion": 0x0101020c,
-	"label":         0x01010001,
-	"hasCode":       0x0101000c,
-	"debuggable":    0x0101000f,
-	"name":          0x01010003,
-	"configChanges": 0x0101001f,
-	"value":         0x01010024,
+	"versionCode":      0x0101021b,
+	"versionName":      0x0101021c,
+	"minSdkVersion":    0x0101020c,
+	"windowFullscreen": 0x0101020d,
+	"label":            0x01010001,
+	"hasCode":          0x0101000c,
+	"debuggable":       0x0101000f,
+	"name":             0x01010003,
+	"configChanges":    0x0101001f,
+	"value":            0x01010024,
 }
 
 // http://developer.android.com/reference/android/R.attr.html#configChanges
